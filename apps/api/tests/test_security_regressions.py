@@ -16,12 +16,16 @@ from app.api.routes import (
     access_token,
     attempt_insert_statement,
     authorization_url,
+    connection_has_scopes,
     google_error_reason,
     google_request,
     has_indexing_ownership,
+    missing_required_scopes,
+    normalize_granted_scopes,
     oauth_error_location,
     property_contains_url,
     property_entries,
+    require_connection_scopes,
     token_expiry_seconds,
 )
 from app.core.config import Settings
@@ -65,10 +69,54 @@ def test_oauth_authorization_url_uses_offline_access_and_pkce_without_verifier_l
     url = authorization_url(cfg, "random-state", verifier)
     query = parse_qs(urlparse(url).query)
     assert query["access_type"] == ["offline"]
+    assert query["include_granted_scopes"] == ["true"]
+    assert "https://www.googleapis.com/auth/webmasters.readonly" in query["scope"][0].split()
+    assert "https://www.googleapis.com/auth/indexing" not in query["scope"][0].split()
     assert query["code_challenge_method"] == ["S256"]
     assert query["code_challenge"] == [b64(hashlib.sha256(verifier.encode()).digest())]
     assert query["state"] == ["random-state"]
     assert verifier not in url
+
+
+def test_oauth_authorization_url_requests_indexing_only_for_incremental_authorization():
+    cfg = Settings(google_client_id="client")
+    url = authorization_url(cfg, "state", "verifier", include_indexing=True)
+    query = parse_qs(urlparse(url).query)
+    assert "https://www.googleapis.com/auth/indexing" in query["scope"][0].split()
+
+
+def test_oauth_scope_validation_accepts_google_email_alias_and_optional_indexing():
+    google_grant = {
+        "https://www.googleapis.com/auth/webmasters.readonly",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    }
+    assert normalize_granted_scopes(google_grant) == {
+        "https://www.googleapis.com/auth/webmasters.readonly",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "openid",
+    }
+    assert missing_required_scopes(google_grant) == set()
+    connection = SimpleNamespace(scopes=sorted(google_grant))
+    assert connection_has_scopes(connection, {"https://www.googleapis.com/auth/webmasters.readonly"})
+    assert not connection_has_scopes(connection, {"https://www.googleapis.com/auth/indexing"})
+
+    email_alias_grant = {"https://www.googleapis.com/auth/webmasters.readonly", "email", "openid"}
+    assert missing_required_scopes(email_alias_grant) == set()
+
+
+def test_oauth_scope_validation_does_not_treat_missing_scope_as_granted():
+    granted = {"openid", "email"}
+    assert missing_required_scopes(granted) == {"https://www.googleapis.com/auth/webmasters.readonly"}
+    connection = SimpleNamespace(scopes=None)
+    assert not connection_has_scopes(connection, {"https://www.googleapis.com/auth/webmasters.readonly"})
+
+
+def test_operation_scope_guard_denies_indexing_without_indexing_permission():
+    connection = SimpleNamespace(scopes=["openid", "email", "https://www.googleapis.com/auth/webmasters.readonly"])
+    with pytest.raises(HTTPException) as exc:
+        require_connection_scopes(connection, {"https://www.googleapis.com/auth/indexing"}, "permission required")
+    assert exc.value.status_code == 403
 
 
 def test_token_expiry_rejects_malformed_or_nonpositive_values():

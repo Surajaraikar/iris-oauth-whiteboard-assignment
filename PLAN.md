@@ -68,3 +68,36 @@
 - [x] Follow-up runtime debugging: corrected the Compose Vite proxy target (`api:8000`); browser-facing health/readiness/connections now return 200 and OAuth start returns a JSON 503 when credentials are absent. Added empty/non-JSON frontend response handling and generic structured FastAPI 500 responses.
 - [x] Follow-up local checks: Docker Compose build/start passed, PostgreSQL healthy at migration `0002_preserve_history`, 21 backend tests, Ruff, mypy, 5 frontend tests, production build, and npm audit (0 findings) passed.
 - The referenced assignment PDF is absent; if its questions differ from the supplied prompt, the written response may need a final alignment pass.
+
+## 2026-10-15 OAuth credential configuration follow-up
+
+- [x] Fresh OAuth credentials are present in the ignored local `.env`; presence was checked without printing values. The exact callback URI is configured.
+- [x] Google Auth Platform client details showed redirect URI `http://localhost:8000/api/v1/auth/google/callback`.
+- [x] Recreated Docker Compose after configuring `.env`; `api`, `db`, and `web` are running, PostgreSQL is healthy, and `/ready` reports the database as `ok`.
+- [x] `/api/v1/connections` returns HTTP 200. `/api/v1/auth/google/start` returns HTTP 200 and constructs an authorization request with state, PKCE, correct callback and requested scopes.
+- [x] Local validation: 21 backend tests, Ruff, mypy (10 source files), 5 frontend tests, and frontend production build passed.
+- [x] At this point in the setup, Google sign-in and consent were still pending. The later live OAuth completion section below records the operations subsequently verified.
+- Previous client secrets were exposed in chat and must be disabled/deleted after the newly configured secret is verified. No credential values are in source control.
+- This latest status supersedes the earlier note that OAuth client creation and local credentials were blocked. This does not establish production readiness.
+
+## 2026-10-15 OAuth scope mismatch fix
+
+- Google Auth Platform Data Access was inspected read-only. It lists the email permission as the canonical `userinfo.email` URL, plus OpenID, Search Console read-only, and Indexing scopes.
+- The previous callback's token response included a string `scope` field (the missing-field case has a separate error). The application did not persist or log that list, so the exact returned list cannot be recovered from the consumed transaction.
+- Fixed the confirmed literal-scope comparison defect by normalizing the `email` / `userinfo.email` aliases. Base connection success now requires Search Console read and identity permissions; Indexing is optional until its operation is used.
+- Added per-operation scope checks for Search Console properties/inspection and Indexing submissions. Missing permissions remain denied. OAuth requests support incremental Indexing authorization and `include_granted_scopes=true`.
+- Added regression tests for scope alias normalization, missing-scope denial, optional Indexing scope, and incremental authorization parameters.
+- Validation after the fix: 24 backend tests passed; Ruff and mypy passed; 5 frontend tests passed; TypeScript/Vite production build passed. Initial build surfaced and then fixed three handler typing errors from the new optional callback argument; final build passed.
+- Docker Compose has now been rebuilt with the scope change. The API is running; PostgreSQL is healthy; `/ready`, `/api/v1/connections`, and both base/incremental OAuth start requests passed smoke checks. The user still needs to repeat Google consent. Callback, encrypted token persistence, connected status, Search Console properties, URL Inspection, Indexing, refresh, and revocation remain unverified live.
+
+## 2026-10-15 live OAuth completion
+
+- [x] User completed Google sign-in and consent; the callback returned HTTP 303 and a connected account was persisted.
+- [x] The safe callback scope diagnostic showed a present `scope` field, granted `openid`, `https://www.googleapis.com/auth/userinfo.email`, `https://www.googleapis.com/auth/webmasters.readonly`, and `https://www.googleapis.com/auth/indexing`, with no missing required scopes.
+- [x] This successful grant confirms the earlier diagnosis: Google returned the configured canonical `userinfo.email` URL while the former code compared the requested `email` literal. The fix normalizes only that alias.
+- [x] Stored access and refresh token columns use encrypted envelopes and both decrypted successfully with the configured key. Connection status is `connected`.
+- [x] Live Search Console `sites.list` returned HTTP 200 with zero properties for this Google account.
+- [x] Real token refresh was exercised through the app by forcing the local expiry timestamp into the past and calling the property endpoint. The request returned HTTP 200; access token changed, future expiry persisted, connection stayed connected, and token envelopes remained decryptable.
+- [ ] URL Inspection and Indexing API notification were not run: no accessible property or eligible URL was returned. No reconnect, disconnect, or revocation was performed to avoid disrupting the active grant.
+- [x] Regression validation: 25 backend tests, Ruff, mypy (10 source files), 5 frontend tests, production frontend build, Compose rebuild, and `git diff --check` passed.
+- No credentials were printed, logged, committed, or pushed. Commit and push were authorized after local verification.

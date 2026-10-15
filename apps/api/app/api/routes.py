@@ -25,8 +25,31 @@ from app.db.session import get_db
 
 router = APIRouter(prefix="/api/v1")
 log = logging.getLogger("iris.api")
-SCOPES = {"https://www.googleapis.com/auth/webmasters.readonly", "https://www.googleapis.com/auth/indexing", "openid", "email"}
+SEARCH_CONSOLE_SCOPE = "https://www.googleapis.com/auth/webmasters.readonly"
+INDEXING_SCOPE = "https://www.googleapis.com/auth/indexing"
+EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
+REQUIRED_SCOPES = {SEARCH_CONSOLE_SCOPE, "openid", EMAIL_SCOPE}
+OPTIONAL_SCOPES = {INDEXING_SCOPE}
+SCOPE_ALIASES = {"email": EMAIL_SCOPE}
+SCOPES = REQUIRED_SCOPES | OPTIONAL_SCOPES
 GOOGLE = "https://oauth2.googleapis.com"
+
+def normalize_granted_scopes(scopes: set[str] | list[str]) -> set[str]:
+    """Normalize documented Google aliases without granting unrelated permissions."""
+    return {SCOPE_ALIASES.get(scope, scope) for scope in scopes}
+
+def missing_required_scopes(scopes: set[str] | list[str]) -> set[str]:
+    return REQUIRED_SCOPES - normalize_granted_scopes(scopes)
+
+def connection_has_scopes(connection: GoogleConnection, required: set[str]) -> bool:
+    stored = connection.scopes
+    if not isinstance(stored, (list, set, tuple)) or any(not isinstance(scope, str) for scope in stored):
+        return False
+    return required.issubset(normalize_granted_scopes(set(stored)))
+
+def require_connection_scopes(connection: GoogleConnection, required: set[str], message: str) -> None:
+    if not connection_has_scopes(connection, required):
+        raise HTTPException(403, message)
 
 def b64(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
@@ -34,9 +57,10 @@ def b64(data: bytes) -> str:
 def cipher() -> TokenCipher:
     return TokenCipher(get_settings())
 
-def authorization_url(cfg, state: str, verifier: str) -> str:
+def authorization_url(cfg, state: str, verifier: str, include_indexing: bool = False) -> str:
     challenge = b64(hashlib.sha256(verifier.encode()).digest())
-    query = urlencode({"client_id": cfg.google_client_id, "redirect_uri": cfg.google_redirect_uri, "response_type": "code", "scope": " ".join(sorted(SCOPES)), "access_type": "offline", "prompt": "consent", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+    requested_scopes = REQUIRED_SCOPES | (OPTIONAL_SCOPES if include_indexing else set())
+    query = urlencode({"client_id": cfg.google_client_id, "redirect_uri": cfg.google_redirect_uri, "response_type": "code", "scope": " ".join(sorted(requested_scopes)), "access_type": "offline", "include_granted_scopes": "true", "prompt": "consent", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
     return "https://accounts.google.com/o/oauth2/v2/auth?" + query
 
 def token_expiry_seconds(value) -> int:
@@ -58,7 +82,7 @@ def oauth_error_location(origin: str, provider_error: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
 
 @router.get("/auth/google/start")
-async def google_start(request: Request, response: Response, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
+async def google_start(request: Request, response: Response, include_indexing: bool = False, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = get_settings()
     if not cfg.google_client_id or not cfg.google_client_secret:
         raise HTTPException(503, "Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
@@ -68,7 +92,7 @@ async def google_start(request: Request, response: Response, user: User = Depend
     state_hash = hashlib.sha256(state.encode()).hexdigest()
     db.add(OAuthTransaction(state_hash=state_hash, user_id=user.id, verifier=verifier, expires_at=now+timedelta(minutes=10)))
     await db.commit()
-    return {"authorization_url": authorization_url(cfg, state, verifier)}
+    return {"authorization_url": authorization_url(cfg, state, verifier, include_indexing)}
 
 @router.get("/auth/google/callback")
 async def google_callback(state: str, code: str | None = None, error: str | None = None, db: AsyncSession = Depends(get_db)):
@@ -92,10 +116,14 @@ async def google_callback(state: str, code: str | None = None, error: str | None
                 raise HTTPException(502, "Google token service returned an incomplete response")
             scope_value = token.get("scope")
             if not isinstance(scope_value, str):
+                log.warning(json.dumps({"event": "oauth_scope_validation", "scope_field_present": False}))
                 raise HTTPException(403, "Google did not return the granted OAuth scopes")
-            returned_scopes = set(scope_value.split())
-            if not SCOPES.issubset(returned_scopes):
-                raise HTTPException(403, "Google did not grant all required scopes")
+            provider_scopes = set(scope_value.split())
+            returned_scopes = normalize_granted_scopes(provider_scopes)
+            missing = REQUIRED_SCOPES - returned_scopes
+            log.info(json.dumps({"event": "oauth_scope_validation", "scope_field_present": True, "granted_scopes": sorted(provider_scopes), "missing_required_scopes": sorted(missing), "indexing_scope_granted": INDEXING_SCOPE in returned_scopes}))
+            if missing:
+                raise HTTPException(403, "Google did not grant required Search Console or identity scopes: " + ", ".join(sorted(missing)))
             info_response = await client.get("https://openidconnect.googleapis.com/v1/userinfo", headers={"Authorization": "Bearer " + token["access_token"]})
             if info_response.status_code != 200:
                 raise HTTPException(400, "Could not verify Google account identity")
@@ -245,7 +273,9 @@ async def reserve_indexing_attempt(db: AsyncSession, user_id: uuid.UUID, connect
 
 @router.get("/search-console/properties")
 async def properties(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    conn = await owned_connection(db, user); token = await access_token(db, conn)
+    conn = await owned_connection(db, user)
+    require_connection_scopes(conn, {SEARCH_CONSOLE_SCOPE}, "Google Search Console read access was not granted; reconnect and approve that permission")
+    token = await access_token(db, conn)
     data = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
     return property_entries(data)
 
@@ -272,7 +302,9 @@ def property_entries(data: dict) -> list[dict]:
 
 @router.post("/search-console/inspect")
 async def inspect(body: InspectBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
-    conn = await owned_connection(db, user); token = await access_token(db, conn)
+    conn = await owned_connection(db, user)
+    require_connection_scopes(conn, {SEARCH_CONSOLE_SCOPE}, "Google Search Console read access was not granted; reconnect and approve that permission")
+    token = await access_token(db, conn)
     props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
     if body.site_url not in {p["siteUrl"] for p in property_entries(props)}:
         raise HTTPException(403, "The connected account does not have access to this property")
@@ -296,6 +328,7 @@ async def indexing(body: IndexBody, request: Request, x_idempotency_key: str = H
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
         raise HTTPException(422, "Use a public HTTPS URL without credentials or a nonstandard port")
     conn = await owned_connection(db, user)
+    require_connection_scopes(conn, {SEARCH_CONSOLE_SCOPE, INDEXING_SCOPE}, "Google Indexing API permission was not granted; reconnect and approve that permission")
     token = await access_token(db, conn)
     props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
     property_entry = next((p for p in property_entries(props) if p["siteUrl"] == body.site_url), None)
