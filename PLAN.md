@@ -44,6 +44,18 @@
 - Production secrets: database URL, session signing key, encryption key ring/current key ID, Google client credentials, and stable HTTPS origins.
 - The public GitHub repository exists. No Google credentials or application secrets are committed.
 
+### 2026-10-15 Google OAuth setup follow-up
+
+- [x] Created the Google Auth Platform configuration in `iris-oauth-wb-20261015-6d435b`; External audience with Testing status is active.
+- [x] Added the signed-in account as a test user and saved Search Console read-only, Indexing API, OpenID, and email scopes.
+- [ ] Web OAuth client creation is blocked: Google Cloud Console's OAuth client page and legacy credentials page stayed on an indefinite loading spinner after project context was restored.
+- [x] Diagnostic follow-up: authenticated gcloud confirms the project is ACTIVE and both APIs are enabled. One direct Clients-page load and one refresh still showed only a progress bar; captured browser console diagnostics had repeated `No ID or name found in config.` warnings and no JavaScript errors. The available browser API did not expose Network panel response details.
+- [x] Checked the documented gcloud alternative: `gcloud iam oauth-clients create` calls the IAM OAuth client API and supports only IAM/federated-client scopes, not the Search Console or Indexing scopes needed here; it was not used.
+- [ ] No Google OAuth credentials are in local `.env`; OAuth start returns a JSON 503 configuration error. Callback, encrypted token persistence, Search Console, Inspection, Indexing, refresh, reconnect, disconnect, and revocation remain unverified live.
+- [x] Local Compose status checked: `api`, `db`, and `web` are running; `/ready` reports `database: ok`.
+- [x] Follow-up validation: 21 backend tests, Ruff, mypy, 5 frontend tests, frontend production build, and `git diff --check` passed. Three Alembic import-order lint violations were corrected.
+- This is partial setup only; it does not establish production readiness or live integration success.
+
 ## 2026-10-15 production-readiness audit
 
 - [x] Corrected indexing-history deletion on disconnect by changing the connection foreign key to `SET NULL` in migration `0002`; downgrade fails safely because prior connection references cannot be reconstructed.

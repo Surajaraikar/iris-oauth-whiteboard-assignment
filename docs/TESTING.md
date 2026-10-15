@@ -29,3 +29,15 @@ The tests are a deterministic regression baseline, not the full database-backed 
 - After the fix: Pytest 21 passed; Ruff and mypy passed; frontend tests 5 passed; production build passed; npm audit reported 0 vulnerabilities; `git diff --check` passed.
 
 Google OAuth, Search Console, URL Inspection, Indexing API, token refresh/revocation, and live Google error/quota behavior were not tested because no Google credentials or verified property are configured. This local runtime result does not establish production readiness.
+
+## Google Cloud OAuth setup follow-up — 2026-10-15
+
+- Google Auth Platform configuration created in project `iris-oauth-wb-20261015-6d435b`; External audience and Testing status were visible in the Console.
+- The signed-in Google account was visible in the Test users list. Data Access displayed the requested Search Console read-only, Indexing API, OpenID, and email scopes, and showed a successful save notification.
+- Web OAuth client was not created. Both the Auth Platform Clients page and the legacy Credentials page remained on an indefinite loading spinner in the authenticated Cloud Console.
+- Local `.env` still has no Google client ID or secret. No credential values were printed, committed, or uploaded.
+- Local checks: Compose services `api`, `db`, and `web` are running; `/ready` returned `{"status":"ready","database":"ok"}`. `/api/v1/auth/google/start` returned HTTP 503 JSON explaining the missing client ID and secret.
+- Follow-up validation: Pytest passed (21 tests); Ruff passed after fixing three Alembic import-order violations; mypy passed (10 source files); frontend tests passed (5 tests); `npm run build` passed; `git diff --check` passed.
+- Live OAuth authorization/callback/token exchange/encrypted persistence, Google Search Console property discovery, URL Inspection, Indexing API, refresh, reconnect, disconnect, and revocation are blocked or untested until a Web client is created and local credentials are securely configured. No live Google API success is claimed.
+- Cloud Console diagnostics: one direct Auth Platform Clients page load and one reload left the page on a progress bar. Captured browser console output contained repeated `No ID or name found in config.` warnings and no JavaScript errors; the available browser diagnostics did not surface Network panel request/response status details. Authenticated gcloud reported the project ACTIVE and both APIs enabled.
+- Supported CLI check: official `gcloud iam oauth-clients create` targets the IAM `iam/v1` OAuth client feature; its documented scopes are `cloud-platform`, `openid`, `email`, and `groups`, so it cannot safely replace the standard Google Auth Platform Web client for Search Console/Indexing API access. It was not invoked to create a client.

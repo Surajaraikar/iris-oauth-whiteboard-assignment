@@ -1,7 +1,8 @@
 """Retain indexing history after a Google connection is disconnected."""
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 revision = "0002_preserve_history"
 down_revision = "0001_initial"
