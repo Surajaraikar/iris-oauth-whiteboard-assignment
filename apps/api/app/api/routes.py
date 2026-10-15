@@ -1,7 +1,9 @@
+import asyncio
 import base64
 import hashlib
 import json
 import logging
+import random
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -120,12 +122,21 @@ async def access_token(db: AsyncSession, conn: GoogleConnection) -> str:
     await db.commit()
     return data["access_token"]
 
-async def google_request(method: str, url: str, token: str, *, json_body=None):
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.request(method, url, json=json_body, headers={"Authorization": "Bearer " + token})
-    except (httpx.TimeoutException, httpx.NetworkError):
-        raise HTTPException(503, "Google API request timed out or could not connect")
+async def google_request(method: str, url: str, token: str, *, json_body=None, safe_to_retry: bool = False):
+    attempts = 3 if safe_to_retry else 1
+    res = None
+    for attempt in range(attempts):
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.request(method, url, json=json_body, headers={"Authorization": "Bearer " + token})
+        except (httpx.TimeoutException, httpx.NetworkError):
+            if attempt + 1 == attempts:
+                raise HTTPException(503, "Google API request timed out or could not connect")
+        else:
+            if res.status_code not in (429, 500, 502, 503, 504) or attempt + 1 == attempts:
+                break
+        await asyncio.sleep((0.2 * (2**attempt)) + random.uniform(0, 0.15))
+    assert res is not None
     if res.status_code == 401: raise HTTPException(401, "Google rejected the access token; reconnect the account")
     if res.status_code == 403: raise HTTPException(403, "Google denied access. Check property permission and API enablement.")
     if res.status_code == 429: raise HTTPException(429, "Google API quota exceeded; retry later")
@@ -137,7 +148,7 @@ async def google_request(method: str, url: str, token: str, *, json_body=None):
 @router.get("/search-console/properties")
 async def properties(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     conn = await owned_connection(db, user); token = await access_token(db, conn)
-    data = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token)
+    data = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
     return data.get("siteEntry", [])
 
 class InspectBody(BaseModel):
@@ -155,13 +166,13 @@ def property_contains_url(site: str, url: str) -> bool:
 @router.post("/search-console/inspect")
 async def inspect(body: InspectBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     conn = await owned_connection(db, user); token = await access_token(db, conn)
-    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token)
+    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
     if body.site_url not in {p.get("siteUrl") for p in props.get("siteEntry", [])}:
         raise HTTPException(403, "The connected account does not have access to this property")
     site = body.site_url
     if not property_contains_url(site, str(body.inspection_url)):
         raise HTTPException(422, "URL is outside the selected property")
-    return await google_request("POST", "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect", token, json_body={"inspectionUrl": str(body.inspection_url), "siteUrl": site})
+    return await google_request("POST", "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect", token, json_body={"inspectionUrl": str(body.inspection_url), "siteUrl": site}, safe_to_retry=True)
 
 class IndexBody(BaseModel):
     url: HttpUrl
@@ -178,7 +189,7 @@ async def indexing(body: IndexBody, request: Request, x_idempotency_key: str = H
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
         raise HTTPException(422, "Use a public HTTPS URL without credentials or a nonstandard port")
     conn = await owned_connection(db, user)
-    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", await access_token(db, conn))
+    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", await access_token(db, conn), safe_to_retry=True)
     if body.site_url not in {p.get("siteUrl") for p in props.get("siteEntry", [])}:
         raise HTTPException(403, "The connected account does not have access to this property")
     if not property_contains_url(body.site_url, str(body.url)):

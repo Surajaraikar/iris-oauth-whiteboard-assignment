@@ -23,4 +23,7 @@ def test_old_encryption_key_remains_decryptable_during_rotation():
     envelope = old.encrypt("refresh")
     rotated = TokenCipher(Settings(encryption_key_id="new", encryption_keys=f"old:{encode(b'o'*32)},new:{encode(b'n'*32)}"))
     assert rotated.decrypt(envelope) == "refresh"
+    rewrapped = rotated.reencrypt(envelope)
+    assert rewrapped.startswith("new.")
+    assert rotated.decrypt(rewrapped) == "refresh"
     assert rotated.decrypt(rotated.encrypt("access")) == "access"
