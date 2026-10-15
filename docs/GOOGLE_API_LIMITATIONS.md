@@ -5,6 +5,8 @@
 - Indexing API is limited to JobPosting pages and livestream pages with BroadcastEvent nested in VideoObject. General-purpose URLs are not eligible.
 - URL_UPDATED and URL_DELETED send crawl/index notifications. A successful response is not evidence of indexing/removal.
 - Google requires Indexing API enablement and quota/approval. The user must have appropriate Search Console ownership/permission.
+- The notification endpoint requires `siteOwner` permission for the selected property, in line with Google's Indexing API setup requirements.
+- Google's setup guide describes a service-account-based authorization path. This implementation currently uses the connected user's OAuth token; validate that authorization model with the target Google Cloud project and approval before relying on live submissions.
 - The implementation accepts the declared page category from the operator and does not fetch the URL to inspect structured data. Google remains authoritative and can reject ineligible pages.
 - API quotas, permissions, OAuth verification and token policies depend on the Google Cloud project and user account.
 

@@ -1,18 +1,19 @@
 # Testing and verification
 
-Automated tests use local crypto/key-rotation and request-schema checks plus a mocked frontend empty-state render. They do not prove a live Google authorization, property permission, API approval, or indexing outcome. Safe property reads and inspections have bounded exponential retry with jitter; Indexing API writes are never automatically retried. Run backend tests with `cd apps/api && pip install -e '.[dev]' && pytest`; run frontend checks with `cd apps/web && npm install && npm test && npm run build`.
+Automated tests cover security configuration, token encryption/key rotation, OAuth PKCE construction and denial handling, token refresh replacement/locking arguments and `invalid_grant`, ownership boundaries, migration-sensitive foreign-key behavior, idempotent reservation SQL, Google error classification, health, and safe retry behavior. They do not prove real PostgreSQL locking semantics or a live Google authorization/property/API/indexing outcome. Safe reads and URL Inspection have bounded exponential retry with jitter; Indexing API writes are never automatically retried. Run backend checks with `cd apps/api && pip install -e '.[dev]' && pytest`; run frontend checks with `cd apps/web && npm install && npm test && npm run build`.
 
 ## Results in the delivery environment
 
 - Python bytecode compile: passed (Python 3.14.2 available; project targets Python 3.12+).
-- Pytest: 5 passed.
+- Pytest: 20 passed.
 - Ruff: passed.
-- FastAPI `/health` smoke request: HTTP 200.
-- Alembic offline SQL generation: passed. No PostgreSQL server was available, so an online migration was not exercised.
+- Mypy: passed (10 backend source files).
+- FastAPI `/health` ASGI test: passed (HTTP 200).
+- Alembic offline SQL generation through both migrations: passed. No PostgreSQL listener or service was available, so an online migration was not exercised.
 - Frontend tests: 1 passed.
 - Frontend production TypeScript/Vite build: passed.
 - npm audit: 0 vulnerabilities.
-- Docker Compose configuration: passed. Image build was attempted but unavailable because the Docker Desktop Linux engine was not running; containers were not started.
+- Docker Compose configuration: passed. `docker build` was attempted but unavailable because the Docker Desktop Linux engine was not running; containers were not started.
 - Live Google OAuth and APIs: not run; credentials, a verified property, and Indexing API approval were not supplied.
 
-The test suite is intentionally a small deterministic baseline and does not yet exercise the full OAuth/database/Google error matrix described in the assignment. Google credentials and Indexing API approval are not included in this repository.
+The tests are a deterministic regression baseline, not the full database-backed OAuth/refresh race matrix. CI is configured to run migrations against PostgreSQL and build the API image on GitHub-hosted runners; those remote checks have not yet been observed for this audit commit. Google credentials and Indexing API approval are not included in this repository.

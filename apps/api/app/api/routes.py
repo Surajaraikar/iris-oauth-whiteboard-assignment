@@ -7,13 +7,14 @@ import random
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, HttpUrl
-from sqlalchemy import select
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import csrf_check, current_user
@@ -33,40 +34,77 @@ def b64(data: bytes) -> str:
 def cipher() -> TokenCipher:
     return TokenCipher(get_settings())
 
+def authorization_url(cfg, state: str, verifier: str) -> str:
+    challenge = b64(hashlib.sha256(verifier.encode()).digest())
+    query = urlencode({"client_id": cfg.google_client_id, "redirect_uri": cfg.google_redirect_uri, "response_type": "code", "scope": " ".join(sorted(SCOPES)), "access_type": "offline", "prompt": "consent", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + query
+
+def token_expiry_seconds(value) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HTTPException(502, "Google token service returned an invalid expiry")
+    try:
+        seconds = int(value)
+    except (ValueError, OverflowError):
+        raise HTTPException(502, "Google token service returned an invalid expiry")
+    if seconds <= 0:
+        raise HTTPException(502, "Google token service returned an invalid expiry")
+    return seconds
+
+def oauth_error_location(origin: str, provider_error: str) -> str:
+    safe_error = provider_error if provider_error in {"access_denied", "temporarily_unavailable", "server_error"} else "authorization_failed"
+    parsed = urlsplit(origin)
+    query = dict(parse_qsl(parsed.query))
+    query["oauth_error"] = safe_error
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
 @router.get("/auth/google/start")
 async def google_start(request: Request, response: Response, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     cfg = get_settings()
     if not cfg.google_client_id or not cfg.google_client_secret:
         raise HTTPException(503, "Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.")
+    now = datetime.now(UTC)
+    await db.execute(delete(OAuthTransaction).where(OAuthTransaction.expires_at <= now))
     state = b64(secrets.token_bytes(32)); verifier = b64(secrets.token_bytes(48))
-    challenge = b64(hashlib.sha256(verifier.encode()).digest())
     state_hash = hashlib.sha256(state.encode()).hexdigest()
-    db.add(OAuthTransaction(state_hash=state_hash, user_id=user.id, verifier=verifier, expires_at=datetime.now(UTC)+timedelta(minutes=10)))
+    db.add(OAuthTransaction(state_hash=state_hash, user_id=user.id, verifier=verifier, expires_at=now+timedelta(minutes=10)))
     await db.commit()
-    query = urlencode({"client_id": cfg.google_client_id, "redirect_uri": cfg.google_redirect_uri, "response_type": "code", "scope": " ".join(sorted(SCOPES)), "access_type": "offline", "prompt": "consent", "state": state, "code_challenge": challenge, "code_challenge_method": "S256"})
-    return {"authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + query}
+    return {"authorization_url": authorization_url(cfg, state, verifier)}
 
 @router.get("/auth/google/callback")
-async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_db)):
+async def google_callback(state: str, code: str | None = None, error: str | None = None, db: AsyncSession = Depends(get_db)):
     cfg = get_settings(); state_hash = hashlib.sha256(state.encode()).hexdigest()
+    if (code is None) == (error is None):
+        raise HTTPException(400, "OAuth callback must contain either a code or an error")
     tx = await db.scalar(select(OAuthTransaction).where(OAuthTransaction.state_hash == state_hash).with_for_update())
     if tx is None or tx.expires_at <= datetime.now(UTC):
         raise HTTPException(400, "OAuth state is invalid, expired, or already used")
     verifier, user_id = tx.verifier, tx.user_id
     await db.delete(tx); await db.commit()  # consume before external request; callback cannot replay
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        token_response = await client.post(f"{GOOGLE}/token", data={"code": code, "client_id": cfg.google_client_id, "client_secret": cfg.google_client_secret, "redirect_uri": cfg.google_redirect_uri, "grant_type": "authorization_code", "code_verifier": verifier})
-        if token_response.status_code != 200:
-            raise HTTPException(400, "Google authorization code exchange failed")
-        token = token_response.json()
-        returned_scopes = set(token.get("scope", "").split())
-        if not SCOPES.issubset(returned_scopes):
-            raise HTTPException(403, "Google did not grant all required scopes")
-        info_response = await client.get("https://openidconnect.googleapis.com/v1/userinfo", headers={"Authorization": "Bearer " + token["access_token"]})
-        if info_response.status_code != 200:
-            raise HTTPException(400, "Could not verify Google account identity")
-        info = info_response.json()
-    if not info.get("sub") or not info.get("email") or info.get("email_verified") is not True:
+    if error is not None:
+        return RedirectResponse(oauth_error_location(cfg.frontend_origin, error), status_code=303)
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            token_response = await client.post(f"{GOOGLE}/token", data={"code": code, "client_id": cfg.google_client_id, "client_secret": cfg.google_client_secret, "redirect_uri": cfg.google_redirect_uri, "grant_type": "authorization_code", "code_verifier": verifier})
+            if token_response.status_code != 200:
+                raise HTTPException(400, "Google authorization code exchange failed")
+            token = token_response.json()
+            if not isinstance(token, dict) or not isinstance(token.get("access_token"), str) or not token["access_token"]:
+                raise HTTPException(502, "Google token service returned an incomplete response")
+            scope_value = token.get("scope")
+            if not isinstance(scope_value, str):
+                raise HTTPException(403, "Google did not return the granted OAuth scopes")
+            returned_scopes = set(scope_value.split())
+            if not SCOPES.issubset(returned_scopes):
+                raise HTTPException(403, "Google did not grant all required scopes")
+            info_response = await client.get("https://openidconnect.googleapis.com/v1/userinfo", headers={"Authorization": "Bearer " + token["access_token"]})
+            if info_response.status_code != 200:
+                raise HTTPException(400, "Could not verify Google account identity")
+            info = info_response.json()
+            if not isinstance(info, dict):
+                raise HTTPException(502, "Google identity service returned an incomplete response")
+    except (httpx.HTTPError, json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(503, "Google authorization service timed out or returned an invalid response")
+    if not isinstance(info.get("sub"), str) or not info["sub"] or not isinstance(info.get("email"), str) or not info["email"] or info.get("email_verified") is not True:
         raise HTTPException(400, "Google account identity is incomplete or unverified")
     conn = await db.scalar(select(GoogleConnection).where(GoogleConnection.user_id == user_id, GoogleConnection.google_sub == info["sub"]).with_for_update())
     refresh_token = token.get("refresh_token")
@@ -74,7 +112,7 @@ async def google_callback(code: str, state: str, db: AsyncSession = Depends(get_
         refresh_token = cipher().decrypt(conn.refresh_token_enc)
     if not refresh_token:
         raise HTTPException(400, "Google did not issue a refresh token; reconnect with offline access")
-    expiry = datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
+    expiry = datetime.now(UTC) + timedelta(seconds=token_expiry_seconds(token.get("expires_in", 3600)))
     fields = {"email": info["email"], "access_token_enc": cipher().encrypt(token["access_token"]), "refresh_token_enc": cipher().encrypt(refresh_token), "expires_at": expiry, "scopes": sorted(returned_scopes), "status": "connected"}
     if conn:
         for k, v in fields.items(): setattr(conn, k, v)
@@ -101,23 +139,34 @@ async def owned_connection(db: AsyncSession, user: User, connection_id: uuid.UUI
     return conn
 
 async def access_token(db: AsyncSession, conn: GoogleConnection) -> str:
-    now = datetime.now(UTC)
     # Lock connection row and re-check expiry so concurrent requests share the refresh.
     await db.refresh(conn, with_for_update=True)
+    now = datetime.now(UTC)
     if conn.expires_at > now + timedelta(minutes=2): return cipher().decrypt(conn.access_token_enc)
     refresh = cipher().decrypt(conn.refresh_token_enc)
     cfg = get_settings()
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        res = await client.post(f"{GOOGLE}/token", data={"client_id": cfg.google_client_id, "client_secret": cfg.google_client_secret, "refresh_token": refresh, "grant_type": "refresh_token"})
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            res = await client.post(f"{GOOGLE}/token", data={"client_id": cfg.google_client_id, "client_secret": cfg.google_client_secret, "refresh_token": refresh, "grant_type": "refresh_token"})
+    except httpx.HTTPError:
+        raise HTTPException(503, "Google token service timed out or could not connect")
+    try:
+        body = res.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(502, "Google token service returned malformed JSON")
+    if not isinstance(body, dict):
+        raise HTTPException(502, "Google token service returned malformed JSON")
     if res.status_code != 200:
-        body = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
         if body.get("error") == "invalid_grant":
             conn.status = "reauthorization_required"; await db.commit()
             raise HTTPException(401, "Google authorization expired or was revoked. Reconnect the account.")
         if res.status_code in (429, 500, 502, 503, 504): raise HTTPException(503, "Google token service temporarily unavailable")
         raise HTTPException(502, "Google token refresh failed")
-    data = res.json(); conn.access_token_enc = cipher().encrypt(data["access_token"])
-    conn.expires_at = datetime.now(UTC) + timedelta(seconds=int(data.get("expires_in", 3600)))
+    data = body
+    if not isinstance(data, dict) or not isinstance(data.get("access_token"), str) or not data["access_token"]:
+        raise HTTPException(502, "Google token service returned an incomplete token response")
+    conn.access_token_enc = cipher().encrypt(data["access_token"])
+    conn.expires_at = datetime.now(UTC) + timedelta(seconds=token_expiry_seconds(data.get("expires_in", 3600)))
     if data.get("refresh_token"): conn.refresh_token_enc = cipher().encrypt(data["refresh_token"])
     await db.commit()
     return data["access_token"]
@@ -129,27 +178,76 @@ async def google_request(method: str, url: str, token: str, *, json_body=None, s
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 res = await client.request(method, url, json=json_body, headers={"Authorization": "Bearer " + token})
-        except (httpx.TimeoutException, httpx.NetworkError):
+        except httpx.TransportError:
             if attempt + 1 == attempts:
                 raise HTTPException(503, "Google API request timed out or could not connect")
         else:
-            if res.status_code not in (429, 500, 502, 503, 504) or attempt + 1 == attempts:
+            reason = google_error_reason(res)
+            transient_quota = res.status_code == 403 and reason in {"ratelimitexceeded", "userratelimitexceeded", "dailylimitexceeded", "quotaexceeded"}
+            if (res.status_code not in (429, 500, 502, 503, 504) and not transient_quota) or attempt + 1 == attempts:
                 break
         await asyncio.sleep((0.2 * (2**attempt)) + random.uniform(0, 0.15))
     assert res is not None
     if res.status_code == 401: raise HTTPException(401, "Google rejected the access token; reconnect the account")
-    if res.status_code == 403: raise HTTPException(403, "Google denied access. Check property permission and API enablement.")
+    if res.status_code == 403:
+        reason = google_error_reason(res)
+        if reason in {"ratelimitexceeded", "userratelimitexceeded", "dailylimitexceeded", "quotaexceeded"}:
+            raise HTTPException(429, "Google API quota exceeded; retry later")
+        if reason in {"insufficientpermissions", "access_token_scope_insufficient", "insufficient_scope"}:
+            raise HTTPException(403, "Google OAuth grant lacks a required API scope; reconnect with the requested permissions")
+        raise HTTPException(403, "Google denied access. Check property permission and API enablement.")
     if res.status_code == 429: raise HTTPException(429, "Google API quota exceeded; retry later")
     if res.status_code >= 500: raise HTTPException(503, "Google API is temporarily unavailable")
     if res.status_code >= 400: raise HTTPException(502, "Google API rejected the request")
-    try: return res.json()
+    try:
+        payload = res.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(502, "Google API returned malformed JSON")
+        return payload
     except json.JSONDecodeError: raise HTTPException(502, "Google API returned malformed JSON")
+
+def google_error_reason(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, str):
+        return error.lower()
+    if not isinstance(error, dict):
+        return ""
+    reasons = []
+    for item in error.get("errors", []):
+        if isinstance(item, dict) and isinstance(item.get("reason"), str):
+            reasons.append(item["reason"].lower())
+    status = error.get("status")
+    return reasons[0] if reasons else (status.lower() if isinstance(status, str) else "")
+
+def attempt_insert_statement(values: dict):
+    return pg_insert(IndexingAttempt).values(**values).on_conflict_do_nothing(index_elements=["user_id", "idempotency_key"])
+
+async def reserve_indexing_attempt(db: AsyncSession, user_id: uuid.UUID, connection_id: uuid.UUID, idempotency_key: str, body: "IndexBody") -> tuple[IndexingAttempt, bool]:
+    attempt_id = uuid.uuid4()
+    values = {"id": attempt_id, "user_id": user_id, "connection_id": connection_id, "idempotency_key": idempotency_key, "url": str(body.url), "site_url": body.site_url, "action": body.action, "page_type": body.page_type, "status": "pending"}
+    result = await db.execute(attempt_insert_statement(values))
+    await db.commit()
+    if getattr(result, "rowcount", 0) == 1:
+        attempt = await db.get(IndexingAttempt, attempt_id)
+        if attempt is None:
+            raise HTTPException(503, "Could not reserve indexing attempt")
+        return attempt, True
+    attempt = await db.scalar(select(IndexingAttempt).where(IndexingAttempt.user_id == user_id, IndexingAttempt.idempotency_key == idempotency_key))
+    if attempt is None:
+        raise HTTPException(503, "Could not load existing idempotency record")
+    if attempt.url != str(body.url) or attempt.site_url != body.site_url or attempt.action != body.action or attempt.page_type != body.page_type:
+        raise HTTPException(409, "Idempotency key was already used for a different request")
+    return attempt, False
 
 @router.get("/search-console/properties")
 async def properties(user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     conn = await owned_connection(db, user); token = await access_token(db, conn)
     data = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
-    return data.get("siteEntry", [])
+    return property_entries(data)
 
 class InspectBody(BaseModel):
     site_url: str = Field(min_length=1, max_length=2048)
@@ -163,11 +261,20 @@ def property_contains_url(site: str, url: str) -> bool:
         return host == domain or host.endswith("." + domain)
     return url.startswith(site)
 
+def has_indexing_ownership(permission_level: str | None) -> bool:
+    return (permission_level or "").casefold() == "siteowner"
+
+def property_entries(data: dict) -> list[dict]:
+    entries = data.get("siteEntry", [])
+    if not isinstance(entries, list) or any(not isinstance(entry, dict) or not isinstance(entry.get("siteUrl"), str) for entry in entries):
+        raise HTTPException(502, "Google Search Console returned malformed property data")
+    return entries
+
 @router.post("/search-console/inspect")
 async def inspect(body: InspectBody, user: User = Depends(current_user), db: AsyncSession = Depends(get_db)):
     conn = await owned_connection(db, user); token = await access_token(db, conn)
     props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
-    if body.site_url not in {p.get("siteUrl") for p in props.get("siteEntry", [])}:
+    if body.site_url not in {p["siteUrl"] for p in property_entries(props)}:
         raise HTTPException(403, "The connected account does not have access to this property")
     site = body.site_url
     if not property_contains_url(site, str(body.inspection_url)):
@@ -189,18 +296,19 @@ async def indexing(body: IndexBody, request: Request, x_idempotency_key: str = H
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.port not in (None, 443):
         raise HTTPException(422, "Use a public HTTPS URL without credentials or a nonstandard port")
     conn = await owned_connection(db, user)
-    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", await access_token(db, conn), safe_to_retry=True)
-    if body.site_url not in {p.get("siteUrl") for p in props.get("siteEntry", [])}:
+    token = await access_token(db, conn)
+    props = await google_request("GET", "https://searchconsole.googleapis.com/webmasters/v3/sites", token, safe_to_retry=True)
+    property_entry = next((p for p in property_entries(props) if p["siteUrl"] == body.site_url), None)
+    if property_entry is None:
         raise HTTPException(403, "The connected account does not have access to this property")
+    if not has_indexing_ownership(property_entry.get("permissionLevel")):
+        raise HTTPException(403, "Google Indexing API notifications require Search Console owner permission")
     if not property_contains_url(body.site_url, str(body.url)):
         raise HTTPException(422, "URL is outside the selected property")
-    old = await db.scalar(select(IndexingAttempt).where(IndexingAttempt.user_id == user.id, IndexingAttempt.idempotency_key == x_idempotency_key))
-    if old:
-        if old.url != str(body.url) or old.site_url != body.site_url or old.action != body.action or old.page_type != body.page_type: raise HTTPException(409, "Idempotency key was already used for a different request")
-        return {"id": str(old.id), "status": old.status, "message": "Indexing notification accepted by Google; indexing is not guaranteed." if old.status == "accepted" else old.safe_error}
-    attempt = IndexingAttempt(user_id=user.id, connection_id=conn.id, idempotency_key=x_idempotency_key, url=str(body.url), site_url=body.site_url, action=body.action, page_type=body.page_type, status="pending")
-    db.add(attempt); await db.commit(); await db.refresh(attempt)
-    token = await access_token(db, conn)
+    attempt, is_new = await reserve_indexing_attempt(db, user.id, conn.id, x_idempotency_key, body)
+    if not is_new:
+        message = "Indexing notification accepted by Google; indexing is not guaranteed." if attempt.status == "accepted" else attempt.safe_error or "This idempotent request is already being processed."
+        return {"id": str(attempt.id), "status": attempt.status, "message": message}
     try:
         data = await google_request("POST", "https://indexing.googleapis.com/v3/urlNotifications:publish", token, json_body={"url": str(body.url), "type": body.action})
         attempt.status = "accepted"; attempt.response = {k: v for k, v in data.items() if k in {"url", "type", "notifyTime"}}

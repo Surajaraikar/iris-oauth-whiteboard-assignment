@@ -21,8 +21,10 @@ app.add_middleware(CORSMiddleware, allow_origins=[cfg.frontend_origin], allow_cr
 @app.middleware("http")
 async def correlation(request: Request, call_next):
     started = time.monotonic()
-    if request.url.path in {"/api/v1/auth/google/start", "/api/v1/search-console/inspect", "/api/v1/indexing/notifications"}:
-        bucket = str(request.client.host if request.client else "unknown") + request.url.path
+    sensitive = request.url.path in {"/api/v1/auth/google/start", "/api/v1/auth/google/callback", "/api/v1/search-console/inspect", "/api/v1/indexing/notifications"} or (request.method == "DELETE" and request.url.path.startswith("/api/v1/connections/"))
+    if sensitive:
+        route_group = "/api/v1/connections/{id}" if request.url.path.startswith("/api/v1/connections/") else request.url.path
+        bucket = str(request.client.host if request.client else "unknown") + route_group
         now = time.monotonic(); recent = [t for t in _limits.get(bucket, []) if now - t < 60]
         if len(recent) >= 30:
             return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded; retry shortly"})

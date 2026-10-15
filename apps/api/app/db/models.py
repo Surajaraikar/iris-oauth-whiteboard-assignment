@@ -45,7 +45,7 @@ class IndexingAttempt(Base):
     __table_args__ = (UniqueConstraint("user_id", "idempotency_key"),)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    connection_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("google_connections.id", ondelete="CASCADE"))
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("google_connections.id", ondelete="SET NULL", name="fk_indexing_attempts_connection_id_google_connections"), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(128))
     url: Mapped[str] = mapped_column(Text)
     site_url: Mapped[str] = mapped_column(Text)

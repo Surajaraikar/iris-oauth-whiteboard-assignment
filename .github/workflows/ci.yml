@@ -20,10 +20,12 @@ jobs:
       - run: cd apps/api && pytest
         env: { DATABASE_URL: postgresql+asyncpg://iris:iris@localhost:5432/iris }
       - run: cd apps/api && ruff check app tests
+      - run: cd apps/api && mypy app
+      - run: docker build -t iris-oauth-api:ci ./apps/api
   frontend:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package.json }
-      - run: cd apps/web && npm install && npm test && npm run build
+      - run: cd apps/web && npm install && npm audit --audit-level=moderate && npm test && npm run build
