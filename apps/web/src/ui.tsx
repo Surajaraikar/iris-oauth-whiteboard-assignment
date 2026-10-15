@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'; import { useState } from 'react';
 import { Activity, ArrowUpRight, Check, ChevronDown, CircleHelp, Command, FileSearch, Globe2, LayoutDashboard, Link2, ListChecks, LoaderCircle, Moon, Plus, Search, Settings, ShieldCheck, Sun, X } from 'lucide-react';
+import { api } from './api';
 
-const api = async (path: string, init?: RequestInit) => { const res = await fetch(path, { credentials: 'include', ...init }); const data = await res.json(); if (!res.ok) throw new Error(data.detail || data.message || 'Request failed'); return data; };
 export default function App() {
  const qc = useQueryClient(); const [page,setPage]=useState('Overview'); const [property,setProperty]=useState(''); const [url,setUrl]=useState(''); const [notice,setNotice]=useState(''); const [error,setError]=useState(new URLSearchParams(location.search).has('oauth_error')?'Google authorization was not completed. You can try connecting again.':''); const [dark,setDark]=useState(false); const [pageType,setPageType]=useState('JobPosting'); const [deleteAction,setDeleteAction]=useState(false); const [result,setResult]=useState<any>(null);
  const connections=useQuery({queryKey:['connections'],queryFn:()=>api('/api/v1/connections')}); const connected=connections.data?.[0];

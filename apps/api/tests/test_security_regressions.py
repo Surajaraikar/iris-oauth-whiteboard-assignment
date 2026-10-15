@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.dialects import postgresql
 
@@ -27,7 +27,7 @@ from app.api.routes import (
 from app.core.config import Settings
 from app.core.crypto import TokenCipher
 from app.db.models import IndexingAttempt
-from app.main import app
+from app.main import app, unhandled_exception
 
 
 def b64(value: bytes) -> str:
@@ -256,3 +256,22 @@ async def test_health_endpoint_smoke():
         response = await client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_unhandled_api_exceptions_return_structured_json_without_exception_details():
+    test_app = FastAPI()
+    test_app.add_exception_handler(Exception, unhandled_exception)
+
+    @test_app.get("/failure")
+    async def failure():
+        raise RuntimeError("sensitive database connection string")
+
+    async with AsyncClient(transport=ASGITransport(app=test_app, raise_app_exceptions=False), base_url="http://test") as client:
+        response = await client.get("/failure")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Internal server error"
+    assert response.json()["correlation_id"]
+    assert response.headers["X-Correlation-ID"] == response.json()["correlation_id"]
+    assert "sensitive" not in response.text

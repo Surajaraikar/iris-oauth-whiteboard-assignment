@@ -28,13 +28,13 @@
 - Regression tests cover key handling, production settings, PKCE parameter construction, refresh-token rotation path, property permission and URL boundaries, retry policy, and idempotent insert SQL. They do not exercise full OAuth replay/expiry or PostgreSQL refresh concurrency against a live database.
 - Local demo identity is development-only. A production identity provider/session issuer and shared multi-instance rate limiter are not included.
 - Eligible page type is an operator declaration; URLs are not fetched or schema-verified. This avoids SSRF, but Google remains authoritative and may reject an asserted category.
-- Real Google calls, online PostgreSQL migration, Docker image build/container startup were unavailable or not performed. The Docker daemon was not running and no local PostgreSQL service/listener was available.
+- Live Google calls remain unavailable because no credentials, verified property, or Indexing API approval are configured. Docker Compose/PostgreSQL were started and validated locally on 2026-10-15; both migrations applied successfully.
 - GitHub repository is public at https://github.com/Surajaraikar/iris-oauth-whiteboard-assignment.
 
 ## Validation strategy
 - Deterministic backend tests cover focused security regressions and mocked Google transport retry behavior. Full database-backed OAuth/replay/idempotency cases need PostgreSQL integration coverage.
 - Frontend component tests and production build where package tooling is available.
-- Validate Alembic offline SQL generation and Docker Compose configuration locally. Online migration and Docker image build require the PostgreSQL/Docker engine and are also configured in CI.
+- Validate Alembic online migrations, Docker Compose startup, service health, and frontend-to-backend proxy locally; keep external Google behavior explicitly unverified without credentials.
 - Never describe mocked API results as a live Google integration test.
 
 ## External prerequisites / risks
@@ -53,4 +53,6 @@
 - [x] Local results: 20 pytest passed; Ruff and mypy passed; frontend test/build and npm audit passed; offline migrations and Compose config passed.
 - [x] GitHub Actions run `38690369706` passed online migrations against PostgreSQL and the Docker image build, along with backend and frontend validation. Local Docker/PostgreSQL were unavailable.
 - [ ] No live Google OAuth/API call was performed. Production auth/session issuer, shared limiter, project-specific Indexing API authorization setup, and external approval remain prerequisites.
+- [x] Follow-up runtime debugging: corrected the Compose Vite proxy target (`api:8000`); browser-facing health/readiness/connections now return 200 and OAuth start returns a JSON 503 when credentials are absent. Added empty/non-JSON frontend response handling and generic structured FastAPI 500 responses.
+- [x] Follow-up local checks: Docker Compose build/start passed, PostgreSQL healthy at migration `0002_preserve_history`, 21 backend tests, Ruff, mypy, 5 frontend tests, production build, and npm audit (0 findings) passed.
 - The referenced assignment PDF is absent; if its questions differ from the supplied prompt, the written response may need a final alignment pass.

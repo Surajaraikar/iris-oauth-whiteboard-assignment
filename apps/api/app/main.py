@@ -38,6 +38,20 @@ async def correlation(request: Request, call_next):
         response.set_cookie("iris_csrf", secrets.token_urlsafe(32), httponly=False, secure=cfg.secure_cookies, samesite="lax", max_age=43200, path="/")
     return response
 
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception):
+    correlation_id = getattr(request.state, "correlation_id", str(uuid.uuid4()))
+    logging.getLogger("iris.request").error(json.dumps({
+        "event": "unhandled_exception",
+        "correlation_id": correlation_id,
+        "exception_type": type(exc).__name__,
+    }))
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error", "correlation_id": correlation_id},
+        headers={"X-Correlation-ID": correlation_id},
+    )
+
 @app.get("/health")
 async def health(): return {"status": "ok"}
 
