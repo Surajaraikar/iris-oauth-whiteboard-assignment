@@ -1,0 +1,3 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest'; import { render, screen } from '@testing-library/react'; import { QueryClient, QueryClientProvider } from '@tanstack/react-query'; import App from './ui';
+beforeEach(()=>{vi.stubGlobal('fetch',vi.fn(async()=>new Response(JSON.stringify([]),{status:200,headers:{'content-type':'application/json'}})));});
+describe('dashboard',()=>{it('renders honest Google API empty states',()=>{render(<QueryClientProvider client={new QueryClient()}><App/></QueryClientProvider>);expect(screen.getByText('Good morning, Jordan')).toBeTruthy();expect(screen.getByText('No activity yet')).toBeTruthy();expect(screen.getByText(/Google acceptance does not guarantee indexing/)).toBeTruthy();});});

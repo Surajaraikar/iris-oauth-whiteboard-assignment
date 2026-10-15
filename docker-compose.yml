@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: iris
+      POSTGRES_PASSWORD: iris
+      POSTGRES_DB: iris
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iris"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes: ["iris-data:/var/lib/postgresql/data"]
+  api:
+    build: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://iris:iris@db:5432/iris
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/auth/google/callback}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:5173}
+      SESSION_SECRET: ${SESSION_SECRET:-development-only-change-me}
+      ENCRYPTION_KEY_ID: ${ENCRYPTION_KEY_ID:-local-v1}
+      ENCRYPTION_KEYS: ${ENCRYPTION_KEYS:-}
+      SECURE_COOKIES: ${SECURE_COOKIES:-false}
+    ports: ["8000:8000"]
+    depends_on:
+      db: {condition: service_healthy}
+  web:
+    image: node:22-alpine
+    working_dir: /workspace
+    volumes: ["./apps/web:/workspace"]
+    command: sh -c "npm install && npm run dev"
+    ports: ["5173:5173"]
+    depends_on: [api]
+volumes:
+  iris-data:

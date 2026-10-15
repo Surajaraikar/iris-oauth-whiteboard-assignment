@@ -1,0 +1,29 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: iris, POSTGRES_PASSWORD: iris, POSTGRES_DB: iris }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U iris" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -e "./apps/api[dev]"
+      - run: cd apps/api && alembic upgrade head
+        env: { DATABASE_URL: postgresql+asyncpg://iris:iris@localhost:5432/iris }
+      - run: cd apps/api && pytest
+        env: { DATABASE_URL: postgresql+asyncpg://iris:iris@localhost:5432/iris }
+      - run: cd apps/api && ruff check app tests
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: apps/web/package.json }
+      - run: cd apps/web && npm install && npm test && npm run build
