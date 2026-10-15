@@ -9,11 +9,11 @@ Automated tests cover security configuration, token encryption/key rotation, OAu
 - Ruff: passed.
 - Mypy: passed (10 backend source files).
 - FastAPI `/health` ASGI test: passed (HTTP 200).
-- Alembic offline SQL generation through both migrations: passed. No PostgreSQL listener or service was available, so an online migration was not exercised.
+- Alembic offline SQL generation through both migrations: passed. GitHub Actions also applied both migrations online against its PostgreSQL service.
 - Frontend tests: 1 passed.
 - Frontend production TypeScript/Vite build: passed.
 - npm audit: 0 vulnerabilities.
-- Docker Compose configuration: passed. `docker build` was attempted but unavailable because the Docker Desktop Linux engine was not running; containers were not started.
+- Docker Compose configuration: passed. Local `docker build` was unavailable because the Docker Desktop Linux engine was not running; the GitHub Actions Docker image build passed.
 - Live Google OAuth and APIs: not run; credentials, a verified property, and Indexing API approval were not supplied.
 
-The tests are a deterministic regression baseline, not the full database-backed OAuth/refresh race matrix. CI is configured to run migrations against PostgreSQL and build the API image on GitHub-hosted runners; those remote checks have not yet been observed for this audit commit. Google credentials and Indexing API approval are not included in this repository.
+The tests are a deterministic regression baseline, not the full database-backed OAuth/refresh race matrix. The audit commit's GitHub Actions run passed both online migrations and the API image build, as well as backend and frontend checks. Google credentials and Indexing API approval are not included in this repository.

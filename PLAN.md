@@ -51,6 +51,6 @@
 - [x] Added stable idempotency reservation with PostgreSQL `ON CONFLICT DO NOTHING`, owner-only Indexing API permission checks, OAuth denial handling, malformed response handling, and refresh time calculation after row lock acquisition.
 - [x] Expanded regression coverage and added mypy and Docker image build to CI.
 - [x] Local results: 20 pytest passed; Ruff and mypy passed; frontend test/build and npm audit passed; offline migrations and Compose config passed.
-- [ ] Online migration and Docker image build were not locally verifiable: no PostgreSQL listener/service and Docker Desktop engine unavailable. CI is configured for both; results remain pending.
+- [x] GitHub Actions run `38690369706` passed online migrations against PostgreSQL and the Docker image build, along with backend and frontend validation. Local Docker/PostgreSQL were unavailable.
 - [ ] No live Google OAuth/API call was performed. Production auth/session issuer, shared limiter, project-specific Indexing API authorization setup, and external approval remain prerequisites.
 - The referenced assignment PDF is absent; if its questions differ from the supplied prompt, the written response may need a final alignment pass.
